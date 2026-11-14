@@ -2,43 +2,71 @@ name: Run tests
 # Run test at each push to main, if changes to package or tests files
 on:
   workflow_dispatch:
+  workflow_call:
+  pull_request:
+    branches: [ main ]
   push:
     branches: [ main ]
     paths:
+    - '*.py'
     - 'requirements.txt'
-    - 'app/**'
-    - 'tests/**'
+    - 'libretranslate/**'
     - '.github/workflows/run-tests.yml'
 
 jobs:
 
-  tests:
-    runs-on: ubuntu-latest
+  tests_python:
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        python-version: [3.6, 3.7, 3.8]
+        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install pytest flake8
-        pip install .
-
-    - name: Check code style with flake8 (lint)
-      run: |
-        # warnings if there are Python syntax errors or undefined names 
-        # (remove --exit-zero to fail when syntax error)
-        flake8 . --count --exit-zero --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        pipx install hatch
+        pipx inject hatch "virtualenv<20.29.0" --force
+        hatch run locales
 
     - name: Test with pytest
-      run: pytest
+      run: hatch run test
 
+
+  test_docker_build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker build
+        run: docker build -f docker/Dockerfile -t libretranslate .
+
+      - name: Docker build with some models
+        run: docker build -f docker/Dockerfile -t libretranslate --build-arg models=en,es  .
+
+  test_docker_healthcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker build
+        run: docker build -f docker/Dockerfile -t libretranslate/libretranslate:latest .
+      
+      - name: Docker compose up
+        run: docker compose up -d --pull never
+
+      - name: Check Healthcheck
+        run: |
+          for i in {1..60}; do
+            STATUS=$(docker inspect -f '{{ .State.Health.Status }}' libretranslate 2>/dev/null || echo 'no')
+            echo "Status: $STATUS"
+            if [ "$STATUS" = "healthy" ]; then exit 0; fi
+            sleep 2
+          done
+          echo "LibreTranslate did not become healthy"
+          exit 1
